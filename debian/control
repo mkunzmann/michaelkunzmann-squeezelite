@@ -1,0 +1,19 @@
+Source: squeezelite
+Section: sound
+Priority: extra
+Maintainer: Dianemo <info@dianemo.co.uk>
+Build-Depends: debhelper (>= 8.0.0), libasound2-dev, libflac-dev, libmad0-dev, libvorbis-dev, libfaad-dev, libmpg123-dev, libavformat-dev, libsoxr-dev
+Standards-Version: 3.9.2
+Homepage: http://dianemo.co.uk/
+Vcs-Git: https://code.google.com/r/raducx-squeezelite-ubuntu-deb/
+Vcs-Browser: https://code.google.com/r/raducx-squeezelite-ubuntu-deb/source/browse/
+
+Package: squeezelite
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: Squeezelite - a software squeezebox, client for Logitech Media Server
+
+Package: squeezelite-dbg
+Architecture: any
+Depends: squeezelite (= ${binary:Version})
+Description: Squeezelite - a software squeezebox, client for Logitech Media Server - debug symbols

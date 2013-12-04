@@ -1,0 +1,6 @@
+OPTS = -DFFMPEG -DRESAMPLE -DLINKALL
+
+CFLAGS  += -Wall -fPIC -O2 $(OPTS)
+LDFLAGS += -lasound -lpthread -lm -lrt
+
+include Makefile
