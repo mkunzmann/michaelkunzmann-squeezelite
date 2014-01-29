@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012, 2013, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -338,7 +338,8 @@ static decode_state ff_decode(void) {
 
 		LOCK_O;
 		LOG_INFO("setting track_start");
-		output.next_sample_rate = decode_newstream(ff->codecC->sample_rate, output.max_sample_rate);
+		output.next_sample_rate = decode_newstream(ff->codecC->sample_rate, output.supported_rates);
+		IF_DSD(	output.next_dop = false; )
 		output.track_start = outputbuf->writep;
 		if (output.fade_mode) _checkfade(true);
 		decode.new_stream = false;
