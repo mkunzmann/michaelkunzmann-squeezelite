@@ -480,6 +480,9 @@ static void *output_thread(void *arg) {
 				continue;
 			}
 			output.error_opening = false;
+                        // Wake up amp
+                        ampstate = 1;
+                        relay(1);
 			start = true;
 			UNLOCK;
 		}
@@ -575,6 +578,9 @@ static void *output_thread(void *arg) {
 			pcmp = NULL;
 			output_off = true;
 			vis_stop();
+                        //  Put Amp to Sleep
+                        ampstate = 0;
+                        relay(0);
 			continue;
 		}
 

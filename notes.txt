@@ -1,0 +1,98 @@
+catches the power button for the device
+output.c:  Line 326 & 408, 
+
+
+Status Meanings
+STMu - End of Playlists
+STMd - End of Current Track Stream
+
+STMf - Fetch new Stream Connection
+STMo - Start Track Stream
+STMn - Open New Track Stream
+STMc - Stream Crossfade
+STMs - Start Stream
+STMt - WOrking
+STMp - Pause Stream
+STMr - Resume Stream
+
+
+
+Amplifier Idle - Auto Shutoff and Startup
+
+-------Makefile----------------
+add gpio.c to the sources line
+add -DFFMPEG to compile options so I Dont forget
+
+
+------squeezelite.h---------------
+---Add to end of file
+
+//gpio.c
+
+void relay( int state);
+
+//  my amp state
+int ampstate;
+
+
+
+-------output_alsa.c----------------
+
+----in *output_thread
+----below the if !!alsa_open-----just before start= true
+
+                        // Wake up amp
+                        ampstate = 1;
+                        relay(1);
+//                        sleep(500);  //   Give amp time to power up before allowing play
+ 
+
+----just after the line if (output.state == OUTPUT_OFF
+
+                        //  Put Amp to Sleep
+                        ampstate = 0;
+                        relay(0);
+//                        sleep(50); // let amp power down before turning off analog out
+ 
+
+--------slimproto.c--------------
+----Add in the global varialbes
+
+static u32_t ampidletime = 0;
+static int ampidle = 0;
+static int ampidle_set = 0;
+extern int ampstate;
+#define SLEEP_DELAY 300000
+
+
+
+----In Function process_strm
+	In Case u:   ampidle = 0;
+	In Case s:   ampidle = 0;
+
+---In Function slimproto_run
+---at the beginning of the wake 100ms loop
+
+                        if ((ampstate == 1) && (ampidle_set == 0) && (ampidle == 1) && (now - ampidletime > SLEEP_DELAY) ){
+//                              printf("Amp Idle Sleep %u --- %u.\n",ampidletime, now );
+                                ampidle_set = 1;
+                                relay( 0);
+                        }
+                        if ( ampstate == 1 && ampidle_set == 1 && ampidle == 0){
+                                ampidletime = 0;
+                                ampidle_set = 0;
+                                relay( 1);
+                        }
+
+----in the sentSTMu = true section
+	
+				ampidle = 1;
+				ampidletime = now;
+
+-----in the sentSTMo = true section
+
+				ampidle = 0;	
+
+
+
+

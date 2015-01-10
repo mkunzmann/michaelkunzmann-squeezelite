@@ -56,6 +56,12 @@ event_event wake_e;
 #define LOCK_D   mutex_lock(decode.mutex)
 #define UNLOCK_D mutex_unlock(decode.mutex)
 
+static u32_t ampidletime = 0;
+static int ampidle = 0;
+static int ampidle_set = 0;
+extern int ampstate;
+#define SLEEP_DELAY 300000
+
 static struct {
 	u32_t updated;
 	u32_t stream_start;
@@ -280,6 +286,7 @@ static void process_strm(u8_t *pkt, int len) {
 			output.state = jiffies ? OUTPUT_START_AT : OUTPUT_RUNNING;
 			output.start_at = jiffies;
 			UNLOCK_O;
+			ampidle = 0;
 			LOG_DEBUG("unpause at: %u now: %u", jiffies, gettime_ms());
 			sendSTAT("STMr", 0);
 		}
@@ -296,6 +303,7 @@ static void process_strm(u8_t *pkt, int len) {
 					  strm->autostart, strm->transition_period, strm->transition_type - '0', strm->format);
 			
 			autostart = strm->autostart - '0';
+			ampidle = 0;
 			sendSTAT("STMf", 0);
 			if (header_len > MAX_HEADER -1) {
 				LOG_WARN("header too long: %u", header_len);
@@ -566,6 +574,17 @@ static void slimproto_run() {
 			size_t header_len = 0;
 			last = now;
 
+			//Watch for paused player and put amp to sleep or wake up if playing resumes
+                        if ((ampstate == 1) && (ampidle_set == 0) && (ampidle == 1) && (now - ampidletime > SLEEP_DELAY) ){
+                                ampidle_set = 1;
+                                relay( 0);
+                        }
+                        if ( ampstate == 1 && ampidle_set == 1 && ampidle == 0){
+                                ampidletime = 0;
+                                ampidle_set = 0;
+                                relay( 1);
+                        }
+
 			LOCK_S;
 			status.stream_full = _buf_used(streambuf);
 			status.stream_size = streambuf->size;
@@ -612,10 +631,15 @@ static void slimproto_run() {
 			}
 #endif
 			if (output.state == OUTPUT_RUNNING && !sentSTMu && status.output_full == 0 && status.stream_state <= DISCONNECT) {
+				//stream paused
+				ampidle = 1;
+				ampidletime = now;
 				_sendSTMu = true;
 				sentSTMu = true;
 			}
 			if (output.state == OUTPUT_RUNNING && !sentSTMo && status.output_full == 0 && status.stream_state == STREAMING_HTTP) {
+				//stream playing
+				ampidle = 0;
 				_sendSTMo = true;
 				sentSTMo = true;
 			}

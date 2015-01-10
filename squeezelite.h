@@ -635,3 +635,9 @@ struct codec *register_vorbis(void);
 struct codec *register_faad(void);
 struct codec *register_dsd(void);
 struct codec *register_ff(const char *codec);
+
+//gpio.c
+void relay( int state);
+//  my amp state
+int ampstate;
+

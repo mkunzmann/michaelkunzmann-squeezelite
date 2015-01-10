@@ -13,7 +13,7 @@ OPT_VIS     = -DVISEXPORT
 SOURCES = \
 	main.c slimproto.c buffer.c stream.c utils.c \
 	output.c output_alsa.c output_pa.c output_stdout.c output_pack.c decode.c \
-	flac.c pcm.c mad.c vorbis.c faad.c mpg.c
+	flac.c pcm.c mad.c vorbis.c faad.c mpg.c gpio.c
 
 SOURCES_DSD      = dsd.c dop.c dsd2pcm/dsd2pcm.c
 SOURCES_FF       = ffmpeg.c
