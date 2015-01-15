@@ -18,9 +18,9 @@
  *
  */
 
-// make may define: PORTAUDIO, SELFPIPE, RESAMPLE, RESAMPLE_MP, VISEXPORT, DSD, LINKALL to influence build
+// make may define: PORTAUDIO, SELFPIPE, RESAMPLE, RESAMPLE_MP, VISEXPORT, IR, DSD, LINKALL to influence build
 
-#define VERSION "v1.7.1-beta"
+#define VERSION "v1.8-dev"
 
 #if !defined(MODEL_NAME)
 #define MODEL_NAME SqueezeLite
@@ -108,6 +108,13 @@
 #define VISEXPORT 0
 #endif
 
+#if LINUX && defined(IR)
+#undef IR
+#define IR 1
+#else
+#define IR 0
+#endif
+
 #if defined(DSD)
 #undef DSD
 #define DSD       1
@@ -141,6 +148,7 @@
 #define LIBAVCODEC  "libavcodec.so.%d"
 #define LIBAVFORMAT "libavformat.so.%d"
 #define LIBSOXR "libsoxr.so.0"
+#define LIBLIRC "liblirc_client.so.0"
 #endif
 
 #if OSX
@@ -221,6 +229,7 @@
 #define STREAM_THREAD_STACK_SIZE  64 * 1024
 #define DECODE_THREAD_STACK_SIZE 128 * 1024
 #define OUTPUT_THREAD_STACK_SIZE  64 * 1024
+#define IR_THREAD_STACK_SIZE      64 * 1024
 #define thread_t pthread_t;
 #define closesocket(s) close(s)
 #define last_error() errno
@@ -562,6 +571,8 @@ struct outputstate {
 	unsigned fade_secs;        // set by slimproto
 	unsigned rate_delay;
 	bool delay_active;
+	u32_t stop_time;
+	u32_t idle_to;
 #if DSD
 	bool next_dop;             // set in decode thread
 	bool dop;
@@ -570,7 +581,7 @@ struct outputstate {
 #endif
 };
 
-void output_init_common(log_level level, const char *device, unsigned output_buf_size, unsigned rates[]);
+void output_init_common(log_level level, const char *device, unsigned output_buf_size, unsigned rates[], unsigned idle);
 void output_close_common(void);
 void output_flush(void);
 // _* called with mutex locked
@@ -582,7 +593,7 @@ void _checkfade(bool);
 void list_devices(void);
 bool test_open(const char *device, unsigned rates[]);
 void output_init_alsa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], 
-					  unsigned rate_delay, unsigned rt_priority);
+					  unsigned rate_delay, unsigned rt_priority, unsigned idle);
 void output_close_alsa(void);
 #endif
 
@@ -590,7 +601,7 @@ void output_close_alsa(void);
 #if PORTAUDIO
 void list_devices(void);
 bool test_open(const char *device, unsigned rates[]);
-void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay);
+void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay, unsigned idle);
 void output_close_pa(void);
 void _pa_open(void);
 #endif
@@ -641,3 +652,14 @@ void relay( int state);
 //  my amp state
 int ampstate;
 
+// ir.c
+#if IR
+struct irstate {
+	mutex_type mutex;
+	u32_t code;
+	u32_t ts;
+};
+
+void ir_init(log_level level, char *lircrc);
+void ir_close(void);
+#endif

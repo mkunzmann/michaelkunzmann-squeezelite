@@ -440,7 +440,8 @@ static int _write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t g
 
 static void *output_thread(void *arg) {
 	bool start = true;
-	bool output_off = false, probe_device = (arg != NULL);
+	bool output_off = (output.state == OUTPUT_OFF);
+	bool probe_device = (arg != NULL);
 	int err;
 
 	while (running) {
@@ -624,7 +625,7 @@ static void *output_thread(void *arg) {
 static pthread_t thread;
 
 void output_init_alsa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], 
-					  unsigned rate_delay, unsigned rt_priority) {
+					  unsigned rate_delay, unsigned rt_priority, unsigned idle) {
 
 	unsigned alsa_buffer = ALSA_BUFFER_TIME;
 	unsigned alsa_period = ALSA_PERIOD_COUNT;
@@ -673,7 +674,7 @@ void output_init_alsa(log_level level, const char *device, unsigned output_buf_s
 
 	snd_lib_error_set_handler((snd_lib_error_handler_t)alsa_error_handler);
 
-	output_init_common(level, device, output_buf_size, rates);
+	output_init_common(level, device, output_buf_size, rates, idle);
 
 #if LINUX
 	// RT linux - aim to avoid pagefaults by locking memory: 
