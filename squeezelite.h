@@ -648,9 +648,11 @@ struct codec *register_dsd(void);
 struct codec *register_ff(const char *codec);
 
 //gpio.c
+#if GPIO
 void relay( int state);
 //  my amp state
 int ampstate;
+#endif
 
 // ir.c
 #if IR

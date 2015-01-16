@@ -63,11 +63,13 @@ event_event wake_e;
 #define UNLOCK_I mutex_unlock(ir.mutex)
 #endif
 
+#if GPIO
 static u32_t ampidletime = 0;
 static int ampidle = 0;
 static int ampidle_set = 0;
 extern int ampstate;
 #define SLEEP_DELAY 300000
+#endif
 
 static struct {
 	u32_t updated;
@@ -315,7 +317,9 @@ static void process_strm(u8_t *pkt, int len) {
 			output.state = jiffies ? OUTPUT_START_AT : OUTPUT_RUNNING;
 			output.start_at = jiffies;
 			UNLOCK_O;
+#if GPIO
 			ampidle = 0;
+#endif
 			LOG_DEBUG("unpause at: %u now: %u", jiffies, gettime_ms());
 			sendSTAT("STMr", 0);
 		}
@@ -332,7 +336,9 @@ static void process_strm(u8_t *pkt, int len) {
 					  strm->autostart, strm->transition_period, strm->transition_type - '0', strm->format);
 			
 			autostart = strm->autostart - '0';
+#if GPIO
 			ampidle = 0;
+#endif
 			sendSTAT("STMf", 0);
 			if (header_len > MAX_HEADER -1) {
 				LOG_WARN("header too long: %u", header_len);
@@ -610,6 +616,7 @@ static void slimproto_run() {
 #endif
 			last = now;
 
+#if GPIO
 			//Watch for paused player and put amp to sleep or wake up if playing resumes
                         if ((ampstate == 1) && (ampidle_set == 0) && (ampidle == 1) && (now - ampidletime > SLEEP_DELAY) ){
                                 ampidle_set = 1;
@@ -620,7 +627,7 @@ static void slimproto_run() {
                                 ampidle_set = 0;
                                 relay( 1);
                         }
-
+#endif
 			LOCK_S;
 			status.stream_full = _buf_used(streambuf);
 			status.stream_size = streambuf->size;
@@ -695,9 +702,11 @@ static void slimproto_run() {
 			}
 			if (output.state == OUTPUT_RUNNING && !sentSTMu && status.output_full == 0 && status.stream_state <= DISCONNECT &&
 				_decode_state == DECODE_STOPPED) {
+#if GPIO
 				//stream paused
 				ampidle = 1;
 				ampidletime = now;
+#endif
 				_sendSTMu = true;
 				sentSTMu = true;
 				LOG_DEBUG("output underrun");
@@ -705,8 +714,10 @@ static void slimproto_run() {
 				output.stop_time = now;
 			}
 			if (output.state == OUTPUT_RUNNING && !sentSTMo && status.output_full == 0 && status.stream_state == STREAMING_HTTP) {
+#if GPIO
 				//stream playing
 				ampidle = 0;
+#endif
 				_sendSTMo = true;
 				sentSTMo = true;
 			}
