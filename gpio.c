@@ -43,30 +43,27 @@ void setup_io();
 int gpio_state = -1;
 int initialized = -1;
 
-void relay( int state) {
+void relay(int state) {
     gpio_state = state;
 
-  // Set up gpi pointer for direct register access
-  if (initialized == -1){
-	setup_io();
-	initialized = 1;
-	INP_GPIO(18); // must use INP_GPIO before we can use OUT_GPIO
-     	OUT_GPIO(18);
-//    	INP_GPIO(23); // must use INP_GPIO before we can use OUT_GPIO
-//    	OUT_GPIO(23);
-//    	GPIO_SET =  1<<23;    //This is spare wire for now.
-  }
+    // Set up gpi pointer for direct register access
+    if (initialized == -1) {
+        setup_io();
+        initialized = 1;
+        INP_GPIO(gpio_pin); // must use INP_GPIO before we can use OUT_GPIO
+        OUT_GPIO(gpio_pin);
+    }
 
-  // Set GPIO pin 18 to output
+    // Set GPIO pin 18 to output
 
     if(gpio_state == 1)
-        GPIO_CLR = 1<<18;
+        GPIO_CLR = 1<<gpio_pin;
     else if(gpio_state == 0)
-	GPIO_SET = 1<<18;
+        GPIO_SET = 1<<gpio_pin;
 
     usleep(1);    // Delay to allow any change in state to be reflected in the LEVn, register bit.
 
-//    printf("GPIO 17 is %s\n", (GPLEV0 & BIT_17) ? "high" : "low");
+    // printf("GPIO 17 is %s\n", (GPLEV0 & BIT_17) ? "high" : "low");
 
     // Done!
 }
