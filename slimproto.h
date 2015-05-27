@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -88,6 +88,17 @@ struct SETD_header {
 	// data
 };
 
+#if IR
+struct IR_packet {
+	char  opcode[4];
+	u32_t length;
+	u32_t jiffies;
+	u8_t  format; // ignored by server
+	u8_t  bits;   // ignored by server
+	u32_t ir_code;
+};
+#endif
+
 // from S:P:Squeezebox stream_s
 struct strm_packet {
 	char  opcode[4];
@@ -155,7 +166,7 @@ struct setd_packet {
 // codec open - this is an extension to slimproto to allow the server to read the header and then return decode params
 struct codc_packet {
 	char  opcode[4];
- 	u8_t  format;
+	u8_t  format;
 	u8_t  pcm_sample_size;
 	u8_t  pcm_sample_rate;
 	u8_t  pcm_channels;

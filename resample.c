@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -50,6 +50,9 @@ struct soxr {
 	void (* soxr_delete)(soxr_t);
 	soxr_error_t (* soxr_process)(soxr_t, soxr_in_t, size_t, size_t *, soxr_out_t, size_t olen, size_t *);
 	size_t *(* soxr_num_clips)(soxr_t);
+#if RESAMPLE_MP
+	soxr_runtime_spec_t (* soxr_runtime_spec)(unsigned num_threads);
+#endif
 	// soxr_strerror is a macro so not included here
 #endif
 };
@@ -71,6 +74,7 @@ void resample_samples(struct processstate *process) {
 		SOXR(r, process, r->resampler, process->inbuf, process->in_frames, &idone, process->outbuf, process->max_out_frames, &odone);
 	if (error) {
 		LOG_INFO("soxr_process error: %s", soxr_strerror(error));
+		return;
 	}
 	
 	if (idone != process->in_frames) {
@@ -85,7 +89,7 @@ void resample_samples(struct processstate *process) {
 	
 	clip_cnt = *(SOXR(r, num_clips, r->resampler));
 	if (clip_cnt - r->old_clips) {
-		LOG_DEBUG("resampling clips: %u", (unsigned)(clip_cnt - r->old_clips));
+		LOG_SDEBUG("resampling clips: %u", (unsigned)(clip_cnt - r->old_clips));
 		r->old_clips = clip_cnt;
 	}
 }
@@ -97,6 +101,7 @@ bool resample_drain(struct processstate *process) {
 	soxr_error_t error = SOXR(r, process, r->resampler, NULL, 0, NULL, process->outbuf, process->max_out_frames, &odone);
 	if (error) {
 		LOG_INFO("soxr_process error: %s", soxr_strerror(error));
+		return true;
 	}
 	
 	process->out_frames = odone;
@@ -176,6 +181,9 @@ bool resample_newstream(struct processstate *process, unsigned raw_sample_rate, 
 		soxr_io_spec_t io_spec;
 		soxr_quality_spec_t q_spec;
 		soxr_error_t error;
+#if RESAMPLE_MP
+		soxr_runtime_spec_t r_spec;
+#endif
 
 		LOG_INFO("resampling from %u -> %u", raw_sample_rate, outrate);
 
@@ -196,11 +204,20 @@ bool resample_newstream(struct processstate *process, unsigned raw_sample_rate, 
 			q_spec.phase_response = r->q_phase_response;
 		}
 
+#if RESAMPLE_MP
+		r_spec = SOXR(r, runtime_spec, 0); // make use of libsoxr OpenMP support allowing parallel execution if multiple cores
+#endif		   
+
 		LOG_DEBUG("resampling with soxr_quality_spec_t[precision: %03.1f, passband_end: %03.6f, stopband_begin: %03.6f, "
 				  "phase_response: %03.1f, flags: 0x%02x], soxr_io_spec_t[scale: %03.2f]", q_spec.precision,
 				  q_spec.passband_end, q_spec.stopband_begin, q_spec.phase_response, q_spec.flags, io_spec.scale);
 
+#if RESAMPLE_MP
+		r->resampler = SOXR(r, create, raw_sample_rate, outrate, 2, &error, &io_spec, &q_spec, &r_spec);
+#else
 		r->resampler = SOXR(r, create, raw_sample_rate, outrate, 2, &error, &io_spec, &q_spec, NULL);
+#endif
+
 		if (error) {
 			LOG_INFO("soxr_create error: %s", soxr_strerror(error));
 			return false;
@@ -239,6 +256,9 @@ static bool load_soxr(void) {
 	r->soxr_delete = dlsym(handle, "soxr_delete");
 	r->soxr_process = dlsym(handle, "soxr_process");
 	r->soxr_num_clips = dlsym(handle, "soxr_num_clips");
+#if RESAMPLE_MP
+	r->soxr_runtime_spec = dlsym(handle, "soxr_runtime_spec");
+#endif
 
 	if ((err = dlerror()) != NULL) {
 		LOG_INFO("dlerror: %s", err);		

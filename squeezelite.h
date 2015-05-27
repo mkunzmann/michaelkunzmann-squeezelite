@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -18,23 +18,39 @@
  *
  */
 
-// make may define: PORTAUDIO, SELFPIPE, RESAMPLE, VISEXPORT, DSD, LINKALL to influence build
+// make may define: PORTAUDIO, SELFPIPE, RESAMPLE, RESAMPLE_MP, VISEXPORT, IR, DSD, LINKALL to influence build
 
-#define VERSION "v1.5"
+#define VERSION "v1.8"
+
+#if !defined(MODEL_NAME)
+#define MODEL_NAME SqueezeLite
+#endif
+
+#define QUOTE(name) #name
+#define STR(macro)  QUOTE(macro)
+#define MODEL_NAME_STRING STR(MODEL_NAME)
 
 // build detection
 #if defined(linux)
 #define LINUX     1
 #define OSX       0
 #define WIN       0
+#define FREEBSD   0
 #elif defined (__APPLE__)
 #define LINUX     0
 #define OSX       1
 #define WIN       0
+#define FREEBSD   0
 #elif defined (_MSC_VER)
 #define LINUX     0
 #define OSX       0
 #define WIN       1
+#define FREEBSD   0
+#elif defined(__FreeBSD__)
+#define LINUX     0
+#define OSX       0
+#define WIN       0
+#define FREEBSD   1
 #else
 #error unknown target
 #endif
@@ -52,7 +68,7 @@
 #define SELFPIPE  0
 #define WINEVENT  0
 #endif
-#if (LINUX && !EVENTFD) || OSX
+#if (LINUX && !EVENTFD) || OSX || FREEBSD
 #define EVENTFD   0
 #define SELFPIPE  1
 #define WINEVENT  0
@@ -63,13 +79,19 @@
 #define WINEVENT  1
 #endif
 
-#if defined(RESAMPLE)
+#if defined(RESAMPLE) || defined(RESAMPLE_MP)
 #undef  RESAMPLE
 #define RESAMPLE  1 // resampling
 #define PROCESS   1 // any sample processing (only resampling at present)
 #else
 #define RESAMPLE  0
 #define PROCESS   0
+#endif
+#if defined(RESAMPLE_MP)
+#undef RESAMPLE_MP
+#define RESAMPLE_MP 1
+#else
+#define RESAMPLE_MP 0
 #endif
 
 #if defined(FFMPEG)
@@ -84,6 +106,13 @@
 #define VISEXPORT 1 // visulizer export support uses linux shared memory
 #else
 #define VISEXPORT 0
+#endif
+
+#if LINUX && defined(IR)
+#undef IR
+#define IR 1
+#else
+#define IR 0
 #endif
 
 #if defined(DSD)
@@ -119,6 +148,7 @@
 #define LIBAVCODEC  "libavcodec.so.%d"
 #define LIBAVFORMAT "libavformat.so.%d"
 #define LIBSOXR "libsoxr.so.0"
+#define LIBLIRC "liblirc_client.so.0"
 #endif
 
 #if OSX
@@ -147,6 +177,18 @@
 #define LIBSOXR "libsoxr.dll"
 #endif
 
+#if FREEBSD
+#define LIBFLAC "libFLAC.so.11"
+#define LIBMAD  "libmad.so.2"
+#define LIBMPG "libmpg123.so.0"
+#define LIBVORBIS "libvorbisfile.so.6"
+#define LIBTREMOR "libvorbisidec.so.1"
+#define LIBFAAD "libfaad.so.2"
+#define LIBAVUTIL   "libavutil.so.%d"
+#define LIBAVCODEC  "libavcodec.so.%d"
+#define LIBAVFORMAT "libavformat.so.%d"
+#endif
+
 #endif // !LINKALL
 
 // config options
@@ -172,7 +214,7 @@
 #include <limits.h>
 #include <sys/types.h>
 
-#if LINUX || OSX
+#if LINUX || OSX || FREEBSD
 #include <unistd.h>
 #include <stdbool.h>
 #include <netinet/in.h>
@@ -187,6 +229,7 @@
 #define STREAM_THREAD_STACK_SIZE  64 * 1024
 #define DECODE_THREAD_STACK_SIZE 128 * 1024
 #define OUTPUT_THREAD_STACK_SIZE  64 * 1024
+#define IR_THREAD_STACK_SIZE      64 * 1024
 #define thread_t pthread_t;
 #define closesocket(s) close(s)
 #define last_error() errno
@@ -296,7 +339,7 @@ struct wake {
 #endif
 
 // printf/scanf formats for u64_t
-#if LINUX && __WORDSIZE == 64
+#if (LINUX && __WORDSIZE == 64) || (FREEBSD && __LP64__)
 #define FMT_u64 "%lu"
 #define FMT_x64 "%lx"
 #elif __GLIBC_HAVE_LONG_LONG || defined __GNUC__ || WIN
@@ -354,7 +397,7 @@ void *dlsym(void *handle, const char *symbol);
 char *dlerror(void);
 int poll(struct pollfd *fds, unsigned long numfds, int timeout);
 #endif
-#if LINUX
+#if LINUX || FREEBSD
 void touch_memory(u8_t *buf, size_t size);
 #endif
 
@@ -383,7 +426,7 @@ void buf_init(struct buffer *buf, size_t size);
 void buf_destroy(struct buffer *buf);
 
 // slimproto.c
-void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile);
+void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile, const char *modelname);
 void slimproto_stop(void);
 void wake_controller(void);
 
@@ -414,7 +457,7 @@ void stream_sock(u32_t ip, u16_t port, const char *header, size_t header_len, un
 bool stream_disconnect(void);
 
 // decode.c
-typedef enum { DECODE_STOPPED = 0, DECODE_RUNNING, DECODE_COMPLETE, DECODE_ERROR } decode_state;
+typedef enum { DECODE_STOPPED = 0, DECODE_READY, DECODE_RUNNING, DECODE_COMPLETE, DECODE_ERROR } decode_state;
 
 struct decodestate {
 	decode_state state;
@@ -446,7 +489,7 @@ struct codec {
 	decode_state (*decode)(void);
 };
 
-void decode_init(log_level level, const char *opt);
+void decode_init(log_level level, const char *include_codecs, const char *exclude_codecs);
 void decode_close(void);
 void decode_flush(void);
 unsigned decode_newstream(unsigned sample_rate, unsigned supported_rates[]);
@@ -500,12 +543,14 @@ struct outputstate {
 	int (* write_cb)(frames_t out_frames, bool silence, s32_t gainL, s32_t gainR, s32_t cross_gain_in, s32_t cross_gain_out, s32_t **cross_ptr);
 	unsigned start_frames;
 	unsigned frames_played;
+	unsigned frames_played_dmp;// frames played at the point delay is measured
 	unsigned current_sample_rate;
 	unsigned supported_rates[MAX_SUPPORTED_SAMPLERATES]; // ordered largest first so [0] is max_rate
 	unsigned default_sample_rate;
 	bool error_opening;
 	unsigned device_frames;
 	u32_t updated;
+	u32_t track_start_time;
 	u32_t current_replay_gain;
 	union {
 		u32_t pause_frames;
@@ -516,6 +561,7 @@ struct outputstate {
 	u8_t  *track_start;        // set in decode thread
 	u32_t gainL;               // set by slimproto
 	u32_t gainR;               // set by slimproto
+	bool  invert;              // set by slimproto
 	u32_t next_replay_gain;    // set by slimproto
 	unsigned threshold;        // set by slimproto
 	fade_state fade;
@@ -524,16 +570,19 @@ struct outputstate {
 	fade_dir fade_dir;
 	fade_mode fade_mode;       // set by slimproto
 	unsigned fade_secs;        // set by slimproto
+	unsigned rate_delay;
+	bool delay_active;
+	u32_t stop_time;
+	u32_t idle_to;
 #if DSD
 	bool next_dop;             // set in decode thread
 	bool dop;
 	bool has_dop;              // set in dop_init - output device supports dop
 	unsigned dop_delay;        // set in dop_init - delay in ms switching to/from dop
-	bool dop_delay_active;
 #endif
 };
 
-void output_init_common(log_level level, const char *device, unsigned output_buf_size, unsigned rates[]);
+void output_init_common(log_level level, const char *device, unsigned output_buf_size, unsigned rates[], unsigned idle);
 void output_close_common(void);
 void output_flush(void);
 // _* called with mutex locked
@@ -543,22 +592,26 @@ void _checkfade(bool);
 // output_alsa.c
 #if ALSA
 void list_devices(void);
+void list_mixers(const char *output_device);
+void set_volume(unsigned left, unsigned right);
 bool test_open(const char *device, unsigned rates[]);
-void output_init_alsa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rt_priority);
+void output_init_alsa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], 
+					  unsigned rate_delay, unsigned rt_priority, unsigned idle, char *volume_mixer, bool mixer_unmute);
 void output_close_alsa(void);
 #endif
 
 // output_pa.c
 #if PORTAUDIO
 void list_devices(void);
+void set_volume(unsigned left, unsigned right);
 bool test_open(const char *device, unsigned rates[]);
-void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[]);
+void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay, unsigned idle);
 void output_close_pa(void);
 void _pa_open(void);
 #endif
 
 // output_stdout.c
-void output_init_stdout(log_level level, unsigned output_buf_size, char *params, unsigned rates[]);
+void output_init_stdout(log_level level, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay);
 void output_close_stdout(void);
 
 // output_pack.c
@@ -581,7 +634,7 @@ void vis_stop(void);
 // dop.c
 #if DSD
 bool is_flac_dop(u32_t *lptr, u32_t *rptr, frames_t frames);
-void update_dop_marker(u32_t *ptr, frames_t frames);
+void update_dop(u32_t *ptr, frames_t frames, bool invert);
 void dop_silence_frames(u32_t *ptr, frames_t frames);
 void dop_init(bool enable, unsigned delay);
 #endif
@@ -597,3 +650,15 @@ struct codec *register_vorbis(void);
 struct codec *register_faad(void);
 struct codec *register_dsd(void);
 struct codec *register_ff(const char *codec);
+
+// ir.c
+#if IR
+struct irstate {
+	mutex_type mutex;
+	u32_t code;
+	u32_t ts;
+};
+
+void ir_init(log_level level, char *lircrc);
+void ir_close(void);
+#endif

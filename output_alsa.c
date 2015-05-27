@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -27,6 +27,7 @@
 #include <alsa/asoundlib.h>
 #include <sys/mman.h>
 #include <malloc.h>
+#include <math.h>
 
 #define MAX_DEVICE_LEN 128
 
@@ -49,6 +50,8 @@ static struct {
 	bool mmap;
 	bool reopen;
 	u8_t *write_buf;
+	const char *volume_mixer_name;
+	int volume_mixer_index;
 } alsa;
 
 static snd_pcm_t *pcmp = NULL;
@@ -91,6 +94,173 @@ void list_devices(void) {
 		snd_device_name_free_hint(hints);
 	}
 	printf("\n");
+}
+
+void list_mixers(const char *output_device) {
+	int err;
+	snd_mixer_t *handle;
+	snd_mixer_selem_id_t *sid;
+	snd_mixer_elem_t *elem;
+	snd_mixer_selem_id_alloca(&sid);
+
+	LOG_INFO("listing mixers for: %s", output_device);
+
+	if ((err = snd_mixer_open(&handle, 0)) < 0) {
+		LOG_ERROR("open error: %s", snd_strerror(err));
+		return;
+	}
+	if ((err = snd_mixer_attach(handle, output_device)) < 0) {
+		LOG_ERROR("attach error: %s", snd_strerror(err));
+		snd_mixer_close(handle);
+		return;
+	}
+	if ((err = snd_mixer_selem_register(handle, NULL, NULL)) < 0) {
+		LOG_ERROR("register error: %s", snd_strerror(err));
+		snd_mixer_close(handle);
+		return;
+	}
+	if ((err = snd_mixer_load(handle)) < 0) {
+		LOG_ERROR("load error: %s", snd_strerror(err));
+		snd_mixer_close(handle);
+		return;
+	}
+
+	printf("Volume controls for %s\n", output_device);
+	for (elem = snd_mixer_first_elem(handle); elem; elem = snd_mixer_elem_next(elem)) {
+		if (snd_mixer_selem_has_playback_volume(elem)) {
+			snd_mixer_selem_get_id(elem, sid);
+			printf("   %s", snd_mixer_selem_id_get_name(sid));
+			if (snd_mixer_selem_id_get_index(sid)) {
+				printf(",%d", snd_mixer_selem_id_get_index(sid));
+			}
+			printf("\n");
+		}
+	}
+	printf("\n");
+
+	snd_mixer_close(handle);
+}
+
+#define MINVOL_DB 72 // LMS volume map for SqueezePlay sends values in range ~ -72..0 dB
+
+static void set_mixer(const char *device, const char *mixer, int mixer_index, bool setmax, float ldB, float rdB) {
+	int err;
+	long nleft, nright;
+	long min, max;
+	snd_mixer_t *handle;
+	snd_mixer_selem_id_t *sid;
+	snd_mixer_elem_t* elem;
+
+	if ((err = snd_mixer_open(&handle, 0)) < 0) {
+		LOG_ERROR("open error: %s", snd_strerror(err));
+		return;
+	}
+	if ((err = snd_mixer_attach(handle, device)) < 0) {
+		LOG_ERROR("attach error: %s", snd_strerror(err));
+		snd_mixer_close(handle);
+		return;
+	}
+	if ((err = snd_mixer_selem_register(handle, NULL, NULL)) < 0) {
+		LOG_ERROR("register error: %s", snd_strerror(err));
+		snd_mixer_close(handle);
+		return;
+	}
+	if ((err = snd_mixer_load(handle)) < 0) {
+		LOG_ERROR("load error: %s", snd_strerror(err));
+		snd_mixer_close(handle);
+		return;
+	}
+
+	snd_mixer_selem_id_alloca(&sid);
+
+	snd_mixer_selem_id_set_index(sid, mixer_index);
+	snd_mixer_selem_id_set_name(sid, mixer);
+
+	if ((elem = snd_mixer_find_selem(handle, sid)) == NULL) {
+		LOG_ERROR("error find selem %s", mixer);
+		snd_mixer_close(handle);
+		return;
+	}
+
+	if (snd_mixer_selem_has_playback_switch(elem)) {
+		snd_mixer_selem_set_playback_switch_all(elem, 1); // unmute
+	}
+
+	err = snd_mixer_selem_get_playback_dB_range(elem, &min, &max);
+
+	if (err < 0 || max - min < 1000) {
+		// unable to get db range or range is less than 10dB - ignore and set using raw values
+		if ((err = snd_mixer_selem_get_playback_volume_range(elem, &min, &max)) < 0) {
+			LOG_ERROR("unable to get volume raw range");
+		} else {
+			long lraw, rraw;
+			if (setmax) {
+				lraw = rraw = max;
+			} else {
+				lraw = ((ldB > -MINVOL_DB ? MINVOL_DB + floor(ldB) : 0) / MINVOL_DB * (max-min)) + min;
+				rraw = ((rdB > -MINVOL_DB ? MINVOL_DB + floor(rdB) : 0) / MINVOL_DB * (max-min)) + min;
+			}
+			LOG_DEBUG("setting vol raw [%ld..%ld]", min, max);
+			if ((err = snd_mixer_selem_set_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT, lraw)) < 0) {
+				LOG_ERROR("error setting left volume: %s", snd_strerror(err));
+			}
+			if ((err = snd_mixer_selem_set_playback_volume(elem, SND_MIXER_SCHN_FRONT_RIGHT, rraw)) < 0) {
+				LOG_ERROR("error setting right volume: %s", snd_strerror(err));
+			}
+		}
+	} else {
+		// set db directly
+		LOG_DEBUG("setting vol dB [%ld..%ld]", min, max);
+		if (setmax) {
+			// set to 0dB if available as this should be max volume for music recored at max pcm values
+			if (max >= 0 && min <= 0) {
+				ldB = rdB = 0;
+			} else {
+				ldB = rdB = max;
+			}
+		}
+		if ((err = snd_mixer_selem_set_playback_dB(elem, SND_MIXER_SCHN_FRONT_LEFT, 100 * ldB, 1)) < 0) {
+			LOG_ERROR("error setting left volume: %s", snd_strerror(err));
+		}
+		if ((err = snd_mixer_selem_set_playback_dB(elem, SND_MIXER_SCHN_FRONT_RIGHT, 100 * rdB, 1)) < 0) {
+			LOG_ERROR("error setting right volume: %s", snd_strerror(err));
+		}
+	}
+
+	if ((err = snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_LEFT, &nleft)) < 0) {
+		LOG_ERROR("error getting left vol: %s", snd_strerror(err));
+	}
+	if ((err = snd_mixer_selem_get_playback_volume(elem, SND_MIXER_SCHN_FRONT_RIGHT, &nright)) < 0) {
+		LOG_ERROR("error getting right vol: %s", snd_strerror(err));
+	}
+
+	LOG_DEBUG("%s left: %3.1fdB -> %ld right: %3.1fdB -> %ld", mixer, ldB, nleft, rdB, nright);
+
+	snd_mixer_close(handle);
+}
+
+void set_volume(unsigned left, unsigned right) {
+	float ldB, rdB;
+
+	if (!alsa.volume_mixer_name) {
+		LOG_DEBUG("setting internal gain left: %u right: %u", left, right);
+		LOCK;
+		output.gainL = left;
+		output.gainR = right;
+		UNLOCK;
+		return;
+	} else {
+		LOCK;
+		output.gainL = FIXED_ONE;
+		output.gainR = FIXED_ONE;
+		UNLOCK;
+	}
+
+	// convert 16.16 fixed point to dB
+	ldB = 20 * log10( left  / 65536.0F );
+	rdB = 20 * log10( right / 65536.0F );
+
+	set_mixer(output.device, alsa.volume_mixer_name, alsa.volume_mixer_index, false, ldB, rdB);
 }
 
 static void *alsa_error_handler(const char *file, int line, const char *function, int err, const char *fmt, ...) {
@@ -181,6 +351,8 @@ static int alsa_open(const char *device, unsigned sample_rate, unsigned alsa_buf
 		LOG_ERROR("device name too long: %s", device);
 		return -1;
 	}
+
+	LOG_INFO("opening device at: %u", sample_rate);
 
 	bool retry;
 	do {
@@ -380,7 +552,7 @@ static int _write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t g
 			if (silence) {
 				inputptr = (s32_t *) silencebuf_dop;
 			}
-			update_dop_marker((u32_t *) inputptr, out_frames);
+			update_dop((u32_t *) inputptr, out_frames, output.invert && !silence);
 		}
 	)
 
@@ -438,7 +610,8 @@ static int _write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t g
 
 static void *output_thread(void *arg) {
 	bool start = true;
-	bool output_off = false, probe_device = (arg != NULL);
+	bool output_off = (output.state == OUTPUT_OFF);
+	bool probe_device = (arg != NULL);
 	int err;
 
 	while (running) {
@@ -548,8 +721,11 @@ static void *output_thread(void *arg) {
 			continue;
 		}
 
-		// restrict avail in writei mode as write_buf is restricted to period_size
-		if (!alsa.mmap) {
+		// restrict avail to within sensible limits as alsa drivers can return erroneous large values
+		// in writei mode restrict to period_size due to size of write_buf
+		if (alsa.mmap) {
+			avail = min(avail, alsa.buffer_size);
+		} else {
 			avail = min(avail, alsa.period_size);
 		}
 
@@ -592,6 +768,7 @@ static void *output_thread(void *arg) {
 		} else {
 			output.device_frames = delay;
 			output.updated = gettime_ms();
+			output.frames_played_dmp = output.frames_played;
 		}
 
 		// process frames
@@ -611,13 +788,17 @@ static void *output_thread(void *arg) {
 
 static pthread_t thread;
 
-void output_init_alsa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rt_priority) {
+void output_init_alsa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], 
+					  unsigned rate_delay, unsigned rt_priority, unsigned idle, char *volume_mixer, bool mixer_unmute) {
 
 	unsigned alsa_buffer = ALSA_BUFFER_TIME;
 	unsigned alsa_period = ALSA_PERIOD_COUNT;
 	char *alsa_sample_fmt = NULL;
 	bool alsa_mmap = true;
 	bool alsa_reopen = false;
+
+	char *volume_mixer_name = next_param(volume_mixer, ',');
+	char *volume_mixer_index = next_param(NULL, ',');
 
 	char *t = next_param(params, ':');
 	char *c = next_param(NULL, ':');
@@ -641,11 +822,18 @@ void output_init_alsa(log_level level, const char *device, unsigned output_buf_s
 	alsa.write_buf = NULL;
 	alsa.format = 0;
 	alsa.reopen = alsa_reopen;
+
+	if (!mixer_unmute) {
+		alsa.volume_mixer_name = volume_mixer_name;
+		alsa.volume_mixer_index = volume_mixer_index ? atoi(volume_mixer_index) : 0;
+	}
+
 	output.format = 0;
 	output.buffer = alsa_buffer;
 	output.period = alsa_period;
 	output.start_frames = 0;
 	output.write_cb = &_write_frames;
+	output.rate_delay = rate_delay;
 
 	if (alsa_sample_fmt) {
 		if (!strcmp(alsa_sample_fmt, "32"))	alsa.format = SND_PCM_FORMAT_S32_LE;
@@ -659,7 +847,11 @@ void output_init_alsa(log_level level, const char *device, unsigned output_buf_s
 
 	snd_lib_error_set_handler((snd_lib_error_handler_t)alsa_error_handler);
 
-	output_init_common(level, device, output_buf_size, rates);
+	output_init_common(level, device, output_buf_size, rates, idle);
+
+	if (mixer_unmute && volume_mixer_name) {
+		set_mixer(output.device, volume_mixer_name, volume_mixer_index ? atoi(volume_mixer_index) : 0, true, 0, 0);
+	}
 
 #if LINUX
 	// RT linux - aim to avoid pagefaults by locking memory: 
@@ -670,8 +862,8 @@ void output_init_alsa(log_level level, const char *device, unsigned output_buf_s
 		LOG_INFO("memory locked");
 	}
 
-   	mallopt(M_TRIM_THRESHOLD, -1);
-   	mallopt(M_MMAP_MAX, 0);
+	mallopt(M_TRIM_THRESHOLD, -1);
+	mallopt(M_MMAP_MAX, 0);
 
 	touch_memory(silencebuf, MAX_SILENCE_FRAMES * BYTES_PER_FRAME);
 	touch_memory(outputbuf->buf, outputbuf->size);

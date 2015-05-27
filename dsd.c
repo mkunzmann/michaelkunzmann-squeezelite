@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -621,7 +621,7 @@ struct codec *register_dsd(void) {
 
 	dsd2pcm_precalc();
 
-	LOG_INFO("using dsd");
+	LOG_INFO("using dsd to decode dsf,dff");
 	return &ret;
 }
 

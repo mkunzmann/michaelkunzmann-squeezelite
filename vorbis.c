@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -229,6 +229,11 @@ static decode_state vorbis_decode(void) {
 		UNLOCK_O_direct;
 		UNLOCK_S;
 		return DECODE_COMPLETE;
+
+	} else if (n == OV_HOLE) {
+
+		// recoverable hole in stream, seen when skipping
+		LOG_DEBUG("hole in stream");
 	
 	} else {
 
@@ -321,5 +326,6 @@ struct codec *register_vorbis(void) {
 		return NULL;
 	}
 
+	LOG_INFO("using vorbis to decode ogg");
 	return &ret;
 }

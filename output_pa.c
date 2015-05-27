@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -51,7 +51,7 @@ extern u8_t *silencebuf_dop;
 #endif
 
 void list_devices(void) {
- 	PaError err;
+	PaError err;
 	int i;
 
 	if ((err = Pa_Initialize()) != paNoError) {
@@ -67,9 +67,17 @@ void list_devices(void) {
 	}
 	printf("\n");
 	
- 	if ((err = Pa_Terminate()) != paNoError) {
+	if ((err = Pa_Terminate()) != paNoError) {
 		LOG_WARN("error closing port audio: %s", Pa_GetErrorText(err));
 	}
+}
+
+void set_volume(unsigned left, unsigned right) {
+	LOG_DEBUG("setting internal gain left: %u right: %u", left, right);
+	LOCK;
+	output.gainL = left;
+	output.gainR = right;
+	UNLOCK;
 }
 
 static int pa_device_id(const char *device) {
@@ -265,16 +273,20 @@ void _pa_open(void) {
 			LOG_WARN("error setting finish callback: %s", Pa_GetErrorText(err));
 		}
 	
+		UNLOCK; // StartStream can call pa_callback in a sychronised thread on freebsd, remove lock while it is called
+
 		if ((err = Pa_StartStream(pa.stream)) != paNoError) {
 			LOG_WARN("error starting stream: %s", Pa_GetErrorText(err));
 		}
+
+		LOCK;
 	}
 
 	if (err && !monitor_thread_running) {
 		vis_stop();
 
 		// create a thread to check for output state change or device return
-#if LINUX || OSX
+#if LINUX || OSX || FREEBSD
 		pthread_create(&monitor_thread, NULL, pa_monitor, NULL);
 #endif
 #if WIN
@@ -282,7 +294,7 @@ void _pa_open(void) {
 #endif
 	}
 
-	output.error_opening = !err;
+	output.error_opening = !!err;
 }
 
 static u8_t *optr;
@@ -302,7 +314,7 @@ static int _write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t g
 
 		IF_DSD(
 			if (output.dop) {
-				update_dop_marker((u32_t *) outputbuf->readp, out_frames);
+				update_dop((u32_t *) outputbuf->readp, out_frames, output.invert);
 			}
 		)
 
@@ -315,7 +327,7 @@ static int _write_frames(frames_t out_frames, bool silence, s32_t gainL, s32_t g
 		IF_DSD(
 			if (output.dop) {
 				buf = silencebuf_dop;
-				update_dop_marker((u32_t *) buf, out_frames);
+				update_dop((u32_t *) buf, out_frames, false); // don't invert silence
 			}
 		)
 
@@ -347,12 +359,16 @@ static int pa_callback(const void *pa_input, void *pa_output, unsigned long pa_f
 	}
 
 	output.updated = gettime_ms();
+	output.frames_played_dmp = output.frames_played;
 
-	frames = _output_frames(pa_frames_wanted);
+	do {
+		frames = _output_frames(pa_frames_wanted);
+		pa_frames_wanted -= frames;
+	} while (pa_frames_wanted > 0 && frames != 0);
 
-	if (frames < pa_frames_wanted) {
-		LOG_SDEBUG("pad with silence");
-		memset(optr, 0, (pa_frames_wanted - frames) * BYTES_PER_FRAME);
+	if (pa_frames_wanted > 0) {
+		LOG_DEBUG("pad with silence");
+		memset(optr, 0, pa_frames_wanted * BYTES_PER_FRAME);
 	}
 
 	if (output.state == OUTPUT_OFF) {
@@ -369,7 +385,8 @@ static int pa_callback(const void *pa_input, void *pa_output, unsigned long pa_f
 	return ret;
 }
 
-void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[]) {
+void output_init_pa(log_level level, const char *device, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay,
+					unsigned idle) {
 	PaError err;
 	unsigned latency = 0;
 	int osx_playnice = -1;
@@ -391,16 +408,17 @@ void output_init_pa(log_level level, const char *device, unsigned output_buf_siz
 	output.format = 0;
 	output.start_frames = 0;
 	output.write_cb = &_write_frames;
+	output.rate_delay = rate_delay;
 	pa.stream = NULL;
 
 	LOG_INFO("requested latency: %u", output.latency);
 
- 	if ((err = Pa_Initialize()) != paNoError) {
+	if ((err = Pa_Initialize()) != paNoError) {
 		LOG_WARN("error initialising port audio: %s", Pa_GetErrorText(err));
 		exit(0);
 	}
 
-	output_init_common(level, device, output_buf_size, rates);
+	output_init_common(level, device, output_buf_size, rates, idle);
 
 	LOCK;
 
@@ -425,7 +443,7 @@ void output_close_pa(void) {
 		}
 	}
 
- 	if ((err = Pa_Terminate()) != paNoError) {
+	if ((err = Pa_Terminate()) != paNoError) {
 		LOG_WARN("error closing port audio: %s", Pa_GetErrorText(err));
 	}
 

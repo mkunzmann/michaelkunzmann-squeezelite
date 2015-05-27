@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -271,5 +271,6 @@ struct codec *register_mpg(void) {
 
 	m->use16bit = MPG123(m, feature, MPG123_FEATURE_OUTPUT_32BIT);
 
+	LOG_INFO("using mpg to decode mp3");
 	return &ret;
 }

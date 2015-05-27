@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -228,7 +228,7 @@ static int read_mp4_header(unsigned long *samplerate_p, unsigned char *channels_
 
 		// found media data, advance to start of first chunk and return
 		if (!strcmp(type, "mdat")) {
- 			_buf_inc_readp(streambuf, 8);
+			_buf_inc_readp(streambuf, 8);
 			a->pos += 8;
 			bytes  -= 8;
 			if (play) {
@@ -637,5 +637,6 @@ struct codec *register_faad(void) {
 		return NULL;
 	}
 
+	LOG_INFO("using faad to decode aac");
 	return &ret;
 }

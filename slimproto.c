@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -46,6 +46,9 @@ extern struct outputstate output;
 extern struct decodestate decode;
 
 extern struct codec *codecs[];
+#if IR
+extern struct irstate ir;
+#endif
 
 event_event wake_e;
 
@@ -55,6 +58,10 @@ event_event wake_e;
 #define UNLOCK_O mutex_unlock(outputbuf->mutex)
 #define LOCK_D   mutex_lock(decode.mutex)
 #define UNLOCK_D mutex_unlock(decode.mutex)
+#if IR
+#define LOCK_I   mutex_lock(ir.mutex)
+#define UNLOCK_I mutex_unlock(ir.mutex)
+#endif
 
 static struct {
 	u32_t updated;
@@ -101,7 +108,7 @@ void send_packet(u8_t *packet, size_t len) {
 }
 
 static void sendHELO(bool reconnect, const char *fixed_cap, const char *var_cap, u8_t mac[6]) {
-	const char *base_cap = "Model=squeezelite,ModelName=SqueezeLite,AccuratePlayPoints=1,HasDigitalOut=1";
+	const char *base_cap = "Model=squeezelite,AccuratePlayPoints=1,HasDigitalOut=1,HasPolarityInversion=1,Firmware=" VERSION;
 	struct HELO_packet pkt;
 
 	memset(&pkt, 0, sizeof(pkt));
@@ -226,6 +233,23 @@ static void sendSETDName(const char *name) {
 	send_packet((u8_t *)name, strlen(name) + 1);
 }
 
+#if IR
+void sendIR(u32_t code, u32_t ts) {
+	struct IR_packet pkt;
+
+	memset(&pkt, 0, sizeof(pkt));
+	memcpy(&pkt.opcode, "IR  ", 4);
+	pkt.length = htonl(sizeof(pkt) - 8);
+
+	packN(&pkt.jiffies, ts);
+	pkt.ir_code = htonl(code);
+
+	LOG_DEBUG("IR: ir code: 0x%x ts: %u", code, ts);
+
+	send_packet((u8_t *)&pkt, sizeof(pkt));
+}
+#endif
+
 static void process_strm(u8_t *pkt, int len) {
 	struct strm_packet *strm = (struct strm_packet *)pkt;
 
@@ -257,7 +281,12 @@ static void process_strm(u8_t *pkt, int len) {
 			unsigned interval = unpackN(&strm->replay_gain);
 			LOCK_O;
 			output.pause_frames = interval * status.current_sample_rate / 1000;
-			output.state = interval ? OUTPUT_PAUSE_FRAMES : OUTPUT_STOPPED;				
+			if (interval) {
+				output.state = OUTPUT_PAUSE_FRAMES;
+			} else {
+				output.state = OUTPUT_STOPPED;
+				output.stop_time = gettime_ms();
+			}
 			UNLOCK_O;
 			if (!interval) sendSTAT("STMp", 0);
 			LOG_DEBUG("pause interval: %u", interval);
@@ -280,9 +309,6 @@ static void process_strm(u8_t *pkt, int len) {
 			output.state = jiffies ? OUTPUT_START_AT : OUTPUT_RUNNING;
 			output.start_at = jiffies;
 			UNLOCK_O;
-			LOCK_D;
-			decode.state = DECODE_RUNNING;
-			UNLOCK_D;
 			LOG_DEBUG("unpause at: %u now: %u", jiffies, gettime_ms());
 			sendSTAT("STMr", 0);
 		}
@@ -327,6 +353,7 @@ static void process_strm(u8_t *pkt, int len) {
 			output.next_replay_gain = unpackN(&strm->replay_gain);
 			output.fade_mode = strm->transition_type - '0';
 			output.fade_secs = strm->transition_period;
+			output.invert    = (strm->flags & 0x03) == 0x03;
 			LOG_DEBUG("set fade mode: %u", output.fade_mode);
 			UNLOCK_O;
 		}
@@ -371,8 +398,9 @@ static void process_aude(u8_t *pkt, int len) {
 	if (!aude->enable_spdif && output.state != OUTPUT_OFF) {
 		output.state = OUTPUT_OFF;
 	}
-	if (aude->enable_spdif && output.state == OUTPUT_OFF) {
+	if (aude->enable_spdif && output.state == OUTPUT_OFF && !output.idle_to) {
 		output.state = OUTPUT_STOPPED;
+		output.stop_time = gettime_ms();
 	}
 	UNLOCK_O;
 }
@@ -384,10 +412,7 @@ static void process_audg(u8_t *pkt, int len) {
 
 	LOG_DEBUG("audg gainL: %u gainR: %u adjust: %u", audg->gainL, audg->gainR, audg->adjust);
 
-	LOCK_O;
-	output.gainL = audg->adjust ? audg->gainL : FIXED_ONE;
-	output.gainR = audg->adjust ? audg->gainR : FIXED_ONE;
-	UNLOCK_O;
+	set_volume(audg->adjust ? audg->gainL : FIXED_ONE, audg->adjust ? audg->gainR : FIXED_ONE);
 }
 
 static void process_setd(u8_t *pkt, int len) {
@@ -563,9 +588,16 @@ static void slimproto_run() {
 			bool _sendSTMu = false;
 			bool _sendSTMo = false;
 			bool _sendSTMn = false;
-			disconnect_code disconnect;
+			bool _stream_disconnect = false;
+			bool _start_output = false;
+			decode_state _decode_state;
+			disconnect_code disconnect_code;
 			static char header[MAX_HEADER];
 			size_t header_len = 0;
+#if IR
+			bool _sendIR   = false;
+			u32_t ir_code, ir_ts;
+#endif
 			last = now;
 
 			LOCK_S;
@@ -575,7 +607,7 @@ static void slimproto_run() {
 			status.stream_state = stream.state;
 						
 			if (stream.state == DISCONNECT) {
-				disconnect = stream.disconnect;
+				disconnect_code = stream.disconnect;
 				stream.state = STOPPED;
 				_sendDSCO = true;
 			}
@@ -593,11 +625,35 @@ static void slimproto_run() {
 				stream.meta_send = false;
 			}
 			UNLOCK_S;
+
+			LOCK_D;
+			if ((status.stream_state == STREAMING_HTTP || status.stream_state == STREAMING_FILE) && !sentSTMl
+				&& decode.state == DECODE_READY) {
+				if (autostart == 0) {
+					decode.state = DECODE_RUNNING;
+					_sendSTMl = true;
+					sentSTMl = true;
+				} else if (autostart == 1) {
+					decode.state = DECODE_RUNNING;
+					_start_output = true;
+				}
+				// autostart 2 and 3 require cont to be received first
+			}
+			if (decode.state == DECODE_COMPLETE || decode.state == DECODE_ERROR) {
+				if (decode.state == DECODE_COMPLETE) _sendSTMd = true;
+				if (decode.state == DECODE_ERROR)    _sendSTMn = true;
+				decode.state = DECODE_STOPPED;
+				if (status.stream_state == STREAMING_HTTP || status.stream_state == STREAMING_FILE) {
+					_stream_disconnect = true;
+				}
+			}
+			_decode_state = decode.state;
+			UNLOCK_D;
 			
 			LOCK_O;
 			status.output_full = _buf_used(outputbuf);
 			status.output_size = outputbuf->size;
-			status.frames_played = output.frames_played;
+			status.frames_played = output.frames_played_dmp;
 			status.current_sample_rate = output.current_sample_rate;
 			status.updated = output.updated;
 			status.device_frames = output.device_frames;
@@ -605,7 +661,7 @@ static void slimproto_run() {
 			if (output.track_started) {
 				_sendSTMs = true;
 				output.track_started = false;
-				status.stream_start = output.updated;
+				status.stream_start = output.track_start_time;
 			}
 #if PORTAUDIO
 			if (output.pa_reopen) {
@@ -613,48 +669,46 @@ static void slimproto_run() {
 				output.pa_reopen = false;
 			}
 #endif
-			if (output.state == OUTPUT_RUNNING && !sentSTMu && status.output_full == 0 && status.stream_state <= DISCONNECT) {
+			if (_start_output && (output.state == OUTPUT_STOPPED || OUTPUT_OFF)) {
+				output.state = OUTPUT_BUFFER;
+			}
+			if (output.state == OUTPUT_RUNNING && !sentSTMu && status.output_full == 0 && status.stream_state <= DISCONNECT &&
+				_decode_state == DECODE_STOPPED) {
 				_sendSTMu = true;
 				sentSTMu = true;
+				LOG_DEBUG("output underrun");
+				output.state = OUTPUT_STOPPED;
+				output.stop_time = now;
 			}
 			if (output.state == OUTPUT_RUNNING && !sentSTMo && status.output_full == 0 && status.stream_state == STREAMING_HTTP) {
 				_sendSTMo = true;
 				sentSTMo = true;
 			}
-			UNLOCK_O;
-
-			LOCK_D;
-			if (decode.state == DECODE_RUNNING && now - status.last > 1000) {
+			if (output.state == OUTPUT_STOPPED && output.idle_to && (now - output.stop_time > output.idle_to)) {
+				output.state = OUTPUT_OFF;
+				LOG_DEBUG("output timeout");
+			}
+			if (output.state == OUTPUT_RUNNING && now - status.last > 1000) {
 				_sendSTMt = true;
 				status.last = now;
 			}
-			if (decode.state == DECODE_COMPLETE) {
-				_sendSTMd = true;
-				decode.state = DECODE_STOPPED;
+			UNLOCK_O;
+
+#if IR
+			LOCK_I;
+			if (ir.code) {
+				_sendIR = true;
+				ir_code = ir.code;
+				ir_ts   = ir.ts;
+				ir.code = 0;
 			}
-			if (decode.state == DECODE_ERROR) {
-				_sendSTMn = true;
-				decode.state = DECODE_STOPPED;
-			}
-			if ((status.stream_state == STREAMING_HTTP || status.stream_state == STREAMING_FILE) && !sentSTMl 
-				&& decode.state == DECODE_STOPPED) {
-				if (autostart == 0) {
-					_sendSTMl = true;
-					sentSTMl = true;
-				} else if (autostart == 1) {
-					decode.state = DECODE_RUNNING;
-					LOCK_O;
-					if (output.state == OUTPUT_STOPPED) {
-						output.state = OUTPUT_BUFFER;
-					}
-					UNLOCK_O;
-				}
-				// autostart 2 and 3 require cont to be received first
-			}
-			UNLOCK_D;
-		
+			UNLOCK_I;
+#endif
+
+			if (_stream_disconnect) stream_disconnect();
+
 			// send packets once locks released as packet sending can block
-			if (_sendDSCO) sendDSCO(disconnect);
+			if (_sendDSCO) sendDSCO(disconnect_code);
 			if (_sendSTMs) sendSTAT("STMs", 0);
 			if (_sendSTMd) sendSTAT("STMd", 0);
 			if (_sendSTMt) sendSTAT("STMt", 0);
@@ -664,6 +718,9 @@ static void slimproto_run() {
 			if (_sendSTMn) sendSTAT("STMn", 0);
 			if (_sendRESP) sendRESP(header, header_len);
 			if (_sendMETA) sendMETA(header, header_len);
+#if IR
+			if (_sendIR)   sendIR(ir_code, ir_ts);
+#endif
 		}
 	}
 }
@@ -674,8 +731,8 @@ void wake_controller(void) {
 }
 
 in_addr_t discover_server(void) {
-    struct sockaddr_in d;
-    struct sockaddr_in s;
+	struct sockaddr_in d;
+	struct sockaddr_in s;
 	char *buf;
 	struct pollfd pollinfo;
 
@@ -687,9 +744,9 @@ in_addr_t discover_server(void) {
 	buf = "e";
 
 	memset(&d, 0, sizeof(d));
-    d.sin_family = AF_INET;
+	d.sin_family = AF_INET;
 	d.sin_port = htons(PORT);
-    d.sin_addr.s_addr = htonl(INADDR_BROADCAST);
+	d.sin_addr.s_addr = htonl(INADDR_BROADCAST);
 
 	pollinfo.fd = disc_sock;
 	pollinfo.events = POLLIN;
@@ -717,9 +774,12 @@ in_addr_t discover_server(void) {
 	return s.sin_addr.s_addr;
 }
 
-void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile) {
-    struct sockaddr_in serv_addr;
-	static char fixed_cap[128], var_cap[128] = "";
+#define FIXED_CAP_LEN 256
+#define VAR_CAP_LEN   128
+
+void slimproto(log_level level, char *server, u8_t mac[6], const char *name, const char *namefile, const char *modelname) {
+	struct sockaddr_in serv_addr;
+	static char fixed_cap[FIXED_CAP_LEN], var_cap[VAR_CAP_LEN] = "";
 	bool reconnect = false;
 	unsigned failed_connect = 0;
 	unsigned slimproto_port = 0;
@@ -769,10 +829,11 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 	if (!running) return;
 
 	LOCK_O;
-	sprintf(fixed_cap, ",MaxSampleRate=%u", output.supported_rates[0]); 
+	snprintf(fixed_cap, FIXED_CAP_LEN, ",ModelName=%s,MaxSampleRate=%u", modelname ? modelname : MODEL_NAME_STRING,
+			 output.supported_rates[0]);
 	
 	for (i = 0; i < MAX_CODECS; i++) {
-		if (codecs[i] && codecs[i]->id && strlen(fixed_cap) < 128 - 10) {
+		if (codecs[i] && codecs[i]->id && strlen(fixed_cap) < FIXED_CAP_LEN - 10) {
 			strcat(fixed_cap, ",");
 			strcat(fixed_cap, codecs[i]->types);
 		}
@@ -814,18 +875,16 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 
 		} else {
 
+			struct sockaddr_in our_addr;
+			socklen_t len;
+
 			LOG_INFO("connected");
 
 			var_cap[0] = '\0';
-
 			failed_connect = 0;
 
-#if !WIN
 			// check if this is a local player now we are connected & signal to server via 'loc' format
 			// this requires LocalPlayer server plugin to enable direct file access
-			// not supported on windows at present as the poll in stream.c does not work for file access
-			struct sockaddr_in our_addr;
-			socklen_t len;
 			len = sizeof(our_addr);
 			getsockname(sock, (struct sockaddr *) &our_addr, &len);
 
@@ -833,7 +892,6 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 				LOG_INFO("local player");
 				strcat(var_cap, ",loc");
 			}
-#endif
 
 			// add on any capablity to be sent to the new server
 			if (new_server_cap) {

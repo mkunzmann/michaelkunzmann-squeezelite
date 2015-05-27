@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -104,6 +104,7 @@ static void _check_header(void) {
 				ptr += 8;
 				_buf_inc_readp(streambuf, ptr - streambuf->readp);
 				audio_left = len;
+				LOG_INFO("audio size: %u", audio_left);
 				limit = true;
 				return;
 			}
@@ -113,7 +114,8 @@ static void _check_header(void) {
 				// following 4 bytes is blocksize - ignored
 				ptr += 8 + 8;
 				_buf_inc_readp(streambuf, ptr + offset - streambuf->readp);
-				audio_left = len;
+				audio_left = len - 8 - offset;
+				LOG_INFO("audio size: %u", audio_left);
 				limit = true;
 				return;
 			}
@@ -189,7 +191,7 @@ static decode_state pcm_decode(void) {
 	if (decode.new_stream) {
 		LOG_INFO("setting track_start");
 		LOCK_O_not_direct;
- 		output.next_sample_rate = decode_newstream(sample_rate, output.supported_rates);
+		output.next_sample_rate = decode_newstream(sample_rate, output.supported_rates);
 		output.track_start = outputbuf->writep;
 		IF_DSD( output.next_dop = false; )
 		if (output.fade_mode) _checkfade(true);
@@ -379,6 +381,6 @@ struct codec *register_pcm(void) {
 		pcm_decode,  // decode
 	};
 
-	LOG_INFO("using pcm");
+	LOG_INFO("using pcm to decode aif,pcm");
 	return &ret;
 }

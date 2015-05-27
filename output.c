@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -49,7 +49,9 @@ frames_t _output_frames(frames_t avail) {
 	
 	s32_t gainL = output.current_replay_gain ? gain(output.gainL, output.current_replay_gain) : output.gainL;
 	s32_t gainR = output.current_replay_gain ? gain(output.gainR, output.current_replay_gain) : output.gainR;
-	
+
+	if (output.invert) { gainL = -gainL; gainR = -gainR; }
+
 	frames = _buf_used(outputbuf) / BYTES_PER_FRAME;
 	silence = false;
 
@@ -119,28 +121,36 @@ frames_t _output_frames(frames_t avail) {
 		
 		if (output.track_start && !silence) {
 			if (output.track_start == outputbuf->readp) {
-				frames -= size;
+				unsigned delay = 0;
+				if (output.current_sample_rate != output.next_sample_rate) {
+					delay = output.rate_delay;
+				}
 				IF_DSD(
-					if (output.dop != output.next_dop) {
-						if (output.dop_delay) {
-							// add silence delay in two halves, before and after track start and pcm-dop change
-							if (!output.dop_delay_active) {
-								output.pause_frames = output.current_sample_rate * output.dop_delay / 2000;
-								output.dop_delay_active = true;  // first delay - don't process track start
-								break;
-							} else {
-								output.pause_frames = output.next_sample_rate * output.dop_delay / 2000;
-								output.dop_delay_active = false; // second delay - process track start
-							}
-							output.state = OUTPUT_PAUSE_FRAMES;
-						}
-					}
-					output.dop = output.next_dop;
+				   if (output.dop != output.next_dop) {
+					   delay = output.dop_delay;
+				   }
 				)
+				frames -= size;
+				// add silence delay in two halves, before and after track start on rate or pcm-dop change
+				if (delay) {
+					output.state = OUTPUT_PAUSE_FRAMES;
+					if (!output.delay_active) {
+						output.pause_frames = output.current_sample_rate * delay / 2000;
+						output.delay_active = true;  // first delay - don't process track start
+						break;
+					} else {
+						output.pause_frames = output.next_sample_rate * delay / 2000;
+						output.delay_active = false; // second delay - process track start
+					}
+				}
 				LOG_INFO("track start sample rate: %u replay_gain: %u", output.next_sample_rate, output.next_replay_gain);
 				output.frames_played = 0;
 				output.track_started = true;
+				output.track_start_time = gettime_ms();
 				output.current_sample_rate = output.next_sample_rate;
+				IF_DSD(
+				   output.dop = output.next_dop;
+				)
 				if (!output.fade == FADE_ACTIVE || !output.fade_mode == FADE_CROSSFADE) {
 					output.current_replay_gain = output.next_replay_gain;
 				}
@@ -212,6 +222,7 @@ frames_t _output_frames(frames_t avail) {
 						fade_gain = to_gain((float)cur_f / (float)dur_f);
 						gainL = gain(gainL, fade_gain);
 						gainR = gain(gainR, fade_gain);
+						if (output.invert) { gainL = -gainL; gainR = -gainR; }
 					}
 					if (output.fade_dir == FADE_CROSS) {
 						// cross fade requires special treatment - performed later based on these values
@@ -227,6 +238,7 @@ frames_t _output_frames(frames_t avail) {
 							}
 							gainL = output.gainL;
 							gainR = output.gainR;
+							if (output.invert) { gainL = -gainL; gainR = -gainR; }
 							cross_ptr = (s32_t *)(output.fade_end + cur_f * BYTES_PER_FRAME);
 						} else {
 							LOG_INFO("unable to continue crossfade - too few samples");
@@ -318,14 +330,14 @@ void _checkfade(bool start) {
 			// if default setting used and nothing in buffer attempt to resize to provide full crossfade support
 			LOG_INFO("resize outputbuf for crossfade");
 			_buf_resize(outputbuf, OUTPUTBUF_SIZE_CROSSFADE);
-#if LINUX
+#if LINUX || FREEBSD
 			touch_memory(outputbuf->buf, outputbuf->size);
 #endif			
 		}
 	}
 }
 
-void output_init_common(log_level level, const char *device, unsigned output_buf_size, unsigned rates[]) {
+void output_init_common(log_level level, const char *device, unsigned output_buf_size, unsigned rates[], unsigned idle) {
 	unsigned i;
 
 	loglevel = level;
@@ -355,10 +367,14 @@ void output_init_common(log_level level, const char *device, unsigned output_buf
 		dop_silence_frames((u32_t *)silencebuf_dop, MAX_SILENCE_FRAMES);
 	)
 
-	output.state = OUTPUT_STOPPED;
+	LOG_DEBUG("idle timeout: %u", idle);
+
+	output.state = idle ? OUTPUT_OFF: OUTPUT_STOPPED;
 	output.device = device;
 	output.fade = FADE_INACTIVE;
+	output.invert = false;
 	output.error_opening = false;
+	output.idle_to = (u32_t) idle;
 
 	if (!rates[0]) {
 		if (!test_open(output.device, output.supported_rates)) {
@@ -379,7 +395,7 @@ void output_init_common(log_level level, const char *device, unsigned output_buf
 		}
 	}
 	if (!output.default_sample_rate) {
-		output.default_sample_rate = rates[0];
+		output.default_sample_rate = output.supported_rates[0];
 	}
 	
 	output.current_sample_rate = output.default_sample_rate;
@@ -413,7 +429,7 @@ void output_flush(void) {
 		if (output.error_opening) {
 			output.current_sample_rate = output.default_sample_rate;
 		}
-		IF_DSD( output.dop_delay_active = false; )
+		output.delay_active = false;
 	}
 	output.frames_played = 0;
 	UNLOCK;

@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -67,7 +67,7 @@ static int _stdout_write_frames(frames_t out_frames, bool silence, s32_t gainL, 
 			   if (silence) {
 				   obuf = silencebuf_dop;
 			   }
-			   update_dop_marker((u32_t *)obuf, out_frames);
+			   update_dop((u32_t *)obuf, out_frames, output.invert && !silence);
 		   }
 	)
 
@@ -102,6 +102,7 @@ static void *output_thread() {
 
 		output.device_frames = 0;
 		output.updated = gettime_ms();
+		output.frames_played_dmp = output.frames_played;
 
 		_output_frames(FRAME_BLOCK);
 
@@ -119,7 +120,7 @@ static void *output_thread() {
 
 static thread_type thread;
 
-void output_init_stdout(log_level level, unsigned output_buf_size, char *params, unsigned rates[]) {
+void output_init_stdout(log_level level, unsigned output_buf_size, char *params, unsigned rates[], unsigned rate_delay) {
 	loglevel = level;
 
 	LOG_INFO("init output stdout");
@@ -136,6 +137,7 @@ void output_init_stdout(log_level level, unsigned output_buf_size, char *params,
 	output.format = S32_LE;
 	output.start_frames = FRAME_BLOCK * 2;
 	output.write_cb = &_stdout_write_frames;
+	output.rate_delay = rate_delay;
 
 	if (params) {
 		if (!strcmp(params, "32"))	output.format = S32_LE;
@@ -148,9 +150,9 @@ void output_init_stdout(log_level level, unsigned output_buf_size, char *params,
 		rates[0] = 44100;
 	}
 
-	output_init_common(level, "-", output_buf_size, rates);
+	output_init_common(level, "-", output_buf_size, rates, 0);
 
-#if LINUX || OSX
+#if LINUX || OSX || FREEBSD
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN + OUTPUT_THREAD_STACK_SIZE);

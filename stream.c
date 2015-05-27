@@ -1,7 +1,7 @@
 /* 
  *  Squeezelite - lightweight headless squeezebox emulator
  *
- *  (c) Adrian Smith 2012-2014, triode1@btinternet.com
+ *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
  *  
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -82,19 +82,45 @@ static void *stream_thread() {
 		size_t space;
 
 		LOCK;
-		space = min(_buf_space(streambuf), _buf_cont_write(streambuf));
-		UNLOCK;
 
-		if (fd >= 0 && stream.state > STREAMING_WAIT && space) {
+		space = min(_buf_space(streambuf), _buf_cont_write(streambuf));
+
+		if (fd < 0 || !space || stream.state <= STREAMING_WAIT) {
+			UNLOCK;
+			usleep(100000);
+			continue;
+		}
+
+		if (stream.state == STREAMING_FILE) {
+
+			int n = read(fd, streambuf->writep, space);
+			if (n == 0) {
+				LOG_INFO("end of stream");
+				_disconnect(DISCONNECT, DISCONNECT_OK);
+			}
+			if (n > 0) {
+				_buf_inc_writep(streambuf, n);
+				stream.bytes += n;
+				LOG_SDEBUG("streambuf read %d bytes", n);
+			}
+			if (n < 0) {
+				LOG_WARN("error reading: %s", strerror(last_error()));
+				_disconnect(DISCONNECT, REMOTE_DISCONNECT);
+			}
+
+			UNLOCK;
+			continue;
+
+		} else {
+
 			pollinfo.fd = fd;
 			pollinfo.events = POLLIN;
 			if (stream.state == SEND_HEADERS) {
 				pollinfo.events |= POLLOUT;
 			}
-		} else {
-			usleep(100000);
-			continue;
 		}
+
+		UNLOCK;
 
 		if (poll(&pollinfo, 1, 100)) {
 
@@ -218,7 +244,7 @@ static void *stream_thread() {
 						space = min(space, stream.meta_next);
 					}
 					
-					n = stream.state == STREAMING_FILE ? read(fd, streambuf->writep, space) : recv(fd, streambuf->writep, space, 0);
+					n = recv(fd, streambuf->writep, space, 0);
 					if (n == 0) {
 						LOG_INFO("end of stream");
 						_disconnect(DISCONNECT, DISCONNECT_OK);
@@ -276,11 +302,11 @@ void stream_init(log_level level, unsigned stream_buf_size) {
 
 	fd = -1;
 
-#if LINUX
+#if LINUX || FREEBSD
 	touch_memory(streambuf->buf, streambuf->size);
 #endif
 
-#if LINUX || OSX
+#if LINUX || OSX || FREEBSD
 	pthread_attr_t attr;
 	pthread_attr_init(&attr);
 	pthread_attr_setstacksize(&attr, PTHREAD_STACK_MIN + STREAM_THREAD_STACK_SIZE);
@@ -297,7 +323,7 @@ void stream_close(void) {
 	LOCK;
 	running = false;
 	UNLOCK;
-#if LINUX || OSX
+#if LINUX || OSX || FREEBSD
 	pthread_join(thread, NULL);
 #endif
 	free(stream.header);
@@ -315,13 +341,19 @@ void stream_file(const char *header, size_t header_len, unsigned threshold) {
 
 	LOG_INFO("opening local file: %s", stream.header);
 
+#if WIN
+	fd = open(stream.header, O_RDONLY | O_BINARY);
+#else
 	fd = open(stream.header, O_RDONLY);
+#endif
+
 	stream.state = STREAMING_FILE;
 	if (fd < 0) {
 		LOG_INFO("can't open file: %s", stream.header);
 		stream.state = DISCONNECT;
 	}
-
+	wake_controller();
+	
 	stream.cont_wait = false;
 	stream.meta_interval = 0;
 	stream.meta_next = 0;
@@ -335,7 +367,7 @@ void stream_file(const char *header, size_t header_len, unsigned threshold) {
 }
 
 void stream_sock(u32_t ip, u16_t port, const char *header, size_t header_len, unsigned threshold, bool cont_wait) {
-    struct sockaddr_in addr;
+	struct sockaddr_in addr;
 
 	int sock = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -354,7 +386,7 @@ void stream_sock(u32_t ip, u16_t port, const char *header, size_t header_len, un
 	set_nonblock(sock);
 	set_nosigpipe(sock);
 
-    if (connect_timeout(sock, (struct sockaddr *) &addr, sizeof(addr), 10) < 0) {
+	if (connect_timeout(sock, (struct sockaddr *) &addr, sizeof(addr), 10) < 0) {
 		LOG_INFO("unable to connect to server");
 		LOCK;
 		stream.state = DISCONNECT;

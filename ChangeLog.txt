@@ -62,5 +62,76 @@ Minor changes
 - add configurable delay for switch between pcm and dop
 - allow visexport to work with jivelite running as any user
 - bug fixes for dsf playback, for status progress on windows using wdm-ks output, and to avoid 100% cpu
-- change some logging levels for slimproto to aid readablity
+- change some logging levels for slimproto to aid readability
 
+Version 1.6 23/3/14
+===================
+
+Minor changes
+- add support for direct file playback on windows
+- add configurable delay for switch between pcm sample rates
+- support build on freebsd
+- fix gapless playback on portaudio builds
+- fix gapless playback for mp3 localfile case with tags at start of file
+
+Version 1.6.1 22/4/14
+=====================
+
+Minor changes
+- fix bug with PA version changing sample rate between tracks
+- fix crash when skipping in ogg while resampling
+- fix typo
+
+Version 1.6.2 26/5/14
+=====================
+
+Minor changes
+- fix XRUN on track change when resampling on low power cpus
+- log command line to logfile when debugging enabled
+- option to exclude codecs (-e)
+- support parallel execution of libsoxr
+
+Version 1.6.3 14/6/14
+=====================
+
+Minor changes
+- reduce time to start track when playing local files
+- disable use of OPENMP when RESAMPLE build option defined, add new option RESAMPLE_MP to enable it
+
+Version 1.6.4 7/7/14
+====================
+
+Minor changes
+- improve synchronisation feedback accuracy
+
+Version 1.6.5 21/11/14
+======================
+
+Minor changes
+- fix problem opening ALSA device if 44100 is not supported
+- trap setting of hw player mac address
+
+Version 1.7 1/1/15
+==================
+
+Minor changes
+- allow player modelname to be set at compile or run time
+- workaround alsa drivers reporting very large number of available frames
+- fix clicks on localfile playback of AIFF files
+- add -P option to store process id in a file
+- improve error messages for command line parsing
+
+Version 1.7.1 10/1/15
+=====================
+
+Minor changes
+- fix crash which could occur when resampling
+
+Version 1.8 1/2/15
+==================
+
+Features
+- support for closing output device when idle with -C option
+- support for basic IR input using LIRC on Linux
+- support for volume adjustment or unmuting of alsa mixer
+- support for inverting output polarity via LMS setting (requires recent 7.9 server)
