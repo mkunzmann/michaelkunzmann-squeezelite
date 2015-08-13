@@ -1,13 +1,13 @@
-/* 
+/*
  *  Squeezelite - lightweight headless squeezebox emulator
  *
  *  (c) Adrian Smith 2012-2015, triode1@btinternet.com
- *  
+ *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation, either version 3 of the License, or
  * (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
@@ -61,6 +61,14 @@ event_event wake_e;
 #if IR
 #define LOCK_I   mutex_lock(ir.mutex)
 #define UNLOCK_I mutex_unlock(ir.mutex)
+#endif
+
+#if GPIO
+static u32_t ampidletime = 0;
+static int ampidle = 0;
+static int ampidle_set = 0;
+extern int ampstate;
+#define SLEEP_DELAY 300000
 #endif
 
 static struct {
@@ -147,7 +155,7 @@ static void sendSTAT(const char *event, u32_t server_timestamp) {
 		LOG_SDEBUG("ms_played: 0");
 		ms_played = 0;
 	}
-	
+
 	memset(&pkt, 0, sizeof(struct STAT_packet));
 	memcpy(&pkt.opcode, "STAT", 4);
 	pkt.length = htonl(sizeof(struct STAT_packet) - 8);
@@ -297,7 +305,7 @@ static void process_strm(u8_t *pkt, int len) {
 			unsigned interval = unpackN(&strm->replay_gain);
 			LOCK_O;
 			output.skip_frames = interval * status.current_sample_rate / 1000;
-			output.state = OUTPUT_SKIP_FRAMES;				
+			output.state = OUTPUT_SKIP_FRAMES;
 			UNLOCK_O;
 			LOG_DEBUG("skip ahead interval: %u", interval);
 		}
@@ -309,6 +317,9 @@ static void process_strm(u8_t *pkt, int len) {
 			output.state = jiffies ? OUTPUT_START_AT : OUTPUT_RUNNING;
 			output.start_at = jiffies;
 			UNLOCK_O;
+#if GPIO
+			ampidle = 0;
+#endif
 			LOG_DEBUG("unpause at: %u now: %u", jiffies, gettime_ms());
 			sendSTAT("STMr", 0);
 		}
@@ -319,12 +330,15 @@ static void process_strm(u8_t *pkt, int len) {
 			char *header = (char *)(pkt + sizeof(struct strm_packet));
 			in_addr_t ip = (in_addr_t)strm->server_ip; // keep in network byte order
 			u16_t port = strm->server_port; // keep in network byte order
-			if (ip == 0) ip = slimproto_ip; 
+			if (ip == 0) ip = slimproto_ip;
 
-			LOG_DEBUG("strm s autostart: %c transition period: %u transition type: %u codec: %c", 
+			LOG_DEBUG("strm s autostart: %c transition period: %u transition type: %u codec: %c",
 					  strm->autostart, strm->transition_period, strm->transition_type - '0', strm->format);
-			
+
 			autostart = strm->autostart - '0';
+#if GPIO
+			ampidle = 0;
+#endif
 			sendSTAT("STMf", 0);
 			if (header_len > MAX_HEADER -1) {
 				LOG_WARN("header too long: %u", header_len);
@@ -467,7 +481,7 @@ static void process_serv(u8_t *pkt, int len) {
 			free(new_server_cap);
 			new_server_cap = NULL;
 		}
-	}		
+	}
 }
 
 struct handler {
@@ -518,7 +532,7 @@ static void slimproto_run() {
 		event_type ev;
 
 		if ((ev = wait_readwake(ehandles, 1000)) != EVENT_TIMEOUT) {
-	
+
 			if (ev == EVENT_READ) {
 
 				if (expect > 0) {
@@ -600,18 +614,30 @@ static void slimproto_run() {
 #endif
 			last = now;
 
+#if GPIO
+			//Watch for paused player and put amp to sleep or wake up if playing resumes
+                        if ((ampstate == 1) && (ampidle_set == 0) && (ampidle == 1) && (now - ampidletime > SLEEP_DELAY) ){
+                                ampidle_set = 1;
+                                relay(0);
+                        }
+                        if ( ampstate == 1 && ampidle_set == 1 && ampidle == 0){
+                                ampidletime = 0;
+                                ampidle_set = 0;
+                                relay(1);
+                        }
+#endif
 			LOCK_S;
 			status.stream_full = _buf_used(streambuf);
 			status.stream_size = streambuf->size;
 			status.stream_bytes = stream.bytes;
 			status.stream_state = stream.state;
-						
+
 			if (stream.state == DISCONNECT) {
 				disconnect_code = stream.disconnect;
 				stream.state = STOPPED;
 				_sendDSCO = true;
 			}
-			if (!stream.sent_headers && 
+			if (!stream.sent_headers &&
 				(stream.state == STREAMING_HTTP || stream.state == STREAMING_WAIT || stream.state == STREAMING_BUFFERING)) {
 				header_len = stream.header_len;
 				memcpy(header, stream.header, header_len);
@@ -649,7 +675,7 @@ static void slimproto_run() {
 			}
 			_decode_state = decode.state;
 			UNLOCK_D;
-			
+
 			LOCK_O;
 			status.output_full = _buf_used(outputbuf);
 			status.output_size = outputbuf->size;
@@ -657,7 +683,7 @@ static void slimproto_run() {
 			status.current_sample_rate = output.current_sample_rate;
 			status.updated = output.updated;
 			status.device_frames = output.device_frames;
-			
+
 			if (output.track_started) {
 				_sendSTMs = true;
 				output.track_started = false;
@@ -674,6 +700,11 @@ static void slimproto_run() {
 			}
 			if (output.state == OUTPUT_RUNNING && !sentSTMu && status.output_full == 0 && status.stream_state <= DISCONNECT &&
 				_decode_state == DECODE_STOPPED) {
+#if GPIO
+				//stream paused
+				ampidle = 1;
+				ampidletime = now;
+#endif
 				_sendSTMu = true;
 				sentSTMu = true;
 				LOG_DEBUG("output underrun");
@@ -681,6 +712,10 @@ static void slimproto_run() {
 				output.stop_time = now;
 			}
 			if (output.state == OUTPUT_RUNNING && !sentSTMo && status.output_full == 0 && status.stream_state == STREAMING_HTTP) {
+#if GPIO
+				//stream playing
+				ampidle = 0;
+#endif
 				_sendSTMo = true;
 				sentSTMo = true;
 			}
@@ -831,7 +866,7 @@ void slimproto(log_level level, char *server, u8_t mac[6], const char *name, con
 	LOCK_O;
 	snprintf(fixed_cap, FIXED_CAP_LEN, ",ModelName=%s,MaxSampleRate=%u", modelname ? modelname : MODEL_NAME_STRING,
 			 output.supported_rates[0]);
-	
+
 	for (i = 0; i < MAX_CODECS; i++) {
 		if (codecs[i] && codecs[i]->id && strlen(fixed_cap) < FIXED_CAP_LEN - 10) {
 			strcat(fixed_cap, ",");

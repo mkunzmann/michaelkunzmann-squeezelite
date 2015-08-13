@@ -651,6 +651,11 @@ static void *output_thread(void *arg) {
 				continue;
 			}
 			output.error_opening = false;
+#if GPIO
+                        // Wake up amp
+                        ampstate = 1;
+                        relay(1);
+#endif
 			start = true;
 			UNLOCK;
 		}
@@ -746,6 +751,11 @@ static void *output_thread(void *arg) {
 			pcmp = NULL;
 			output_off = true;
 			vis_stop();
+#if GPIO
+                        //  Put Amp to Sleep
+                        ampstate = 0;
+                        relay(0);
+#endif
 			continue;
 		}
 
